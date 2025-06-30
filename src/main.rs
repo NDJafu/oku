@@ -1,10 +1,11 @@
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 
 use clap::Parser;
 use convert_case::{Case, Casing};
 use dialoguer::{console, Confirm, Input, Select};
 use handlebars::{handlebars_helper, Handlebars};
+use regex::Regex;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -33,6 +34,10 @@ struct Action {
   r#type: String,
   template: String,
   output: String,
+  #[serde(default)]
+  pattern: String,
+  #[serde(default)]
+  skip_if_exists: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -159,22 +164,63 @@ fn main() {
     let action_type = action.r#type.as_str();
     let template = action.template;
     let output = action.output;
+    let pattern = action.pattern;
+    let skip = action.skip_if_exists;
 
-    let template_str = fs::read_to_string(
-      cwd
-        .join("generators")
-        .join(&selection.name)
-        .join("templates")
-        .join(&template),
-    )
-    .expect(&format!("Can't find template: {}", template));
-
-    let rendered = handlebars.render_template(&template_str, &context).unwrap();
     let output_path = handlebars.render_template(&output, &context).unwrap();
+    let output_str = cwd.join(output_path);
 
     match action_type {
-      _ => {
-        let output_str = cwd.join(output_path);
+      "modify" => {
+        let file = fs::OpenOptions::new()
+          .read(true)
+          .open(&output_str)
+          .expect(&format!(
+            "Can't read file, make sure that {:?} exist",
+            &output_str
+          ));
+
+        let reader = BufReader::new(file);
+
+        let lines: Vec<String> = reader.lines().collect::<Result<_, _>>().unwrap();
+
+        let regex = Regex::new(&pattern).unwrap();
+        let new_line = handlebars.render_template(&template, &context).unwrap();
+        let mut new_lines = Vec::new();
+
+        for line in lines {
+          if regex.is_match(&line) {
+            new_lines.push(new_line.clone())
+          }
+          new_lines.push(line)
+        }
+
+        let mut file = fs::OpenOptions::new()
+          .write(true)
+          .truncate(true)
+          .open(&output_str)
+          .unwrap();
+
+        for line in new_lines {
+          writeln!(file, "{}", line).unwrap();
+        }
+      }
+      "add" => {
+        let if_file_exists = std::path::Path::new(&output_str);
+        if skip && if_file_exists.exists() {
+          continue;
+        }
+
+        let template_str = fs::read_to_string(
+          cwd
+            .join("generators")
+            .join(&selection.name)
+            .join("templates")
+            .join(&template),
+        )
+        .expect(&format!("Can't find template: {}", template));
+
+        let rendered = handlebars.render_template(&template_str, &context).unwrap();
 
         if let Some(parent) = output_str.parent() {
           fs::create_dir_all(parent).expect("Can't create directories");
@@ -183,6 +229,7 @@ fn main() {
         let mut file = fs::File::create(&output_str).expect("Can't create file");
         writeln!(file, "{}", rendered).unwrap();
       }
+      _ => {}
     }
   }
 }
